@@ -1,0 +1,235 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  body {
+    @apply bg-gray-950 text-gray-100 antialiased;
+    background-image: radial-gradient(ellipse at 0% 0%, rgba(37, 99, 235, 0.06) 0%, transparent 50%),
+                      radial-gradient(ellipse at 100% 100%, rgba(99, 102, 241, 0.04) 0%, transparent 50%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background-color: rgba(59, 130, 246, 0.35);
+    color: white;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-600;
+  }
+
+  /* Focus ring */
+  *:focus-visible {
+    outline: 2px solid rgba(59, 130, 246, 0.6);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Cards */
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-2xl p-5;
+  }
+  .card-hover {
+    @apply bg-gray-900 border border-gray-800 rounded-2xl p-5 hover:border-gray-700 transition-all cursor-pointer;
+  }
+
+  /* Buttons */
+  .btn-primary {
+    @apply inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2.5 rounded-xl transition-all shadow-lg shadow-blue-600/20 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98];
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white font-medium px-4 py-2.5 rounded-xl transition-all border border-gray-700 disabled:opacity-50 active:scale-[0.98];
+  }
+  .btn-danger {
+    @apply inline-flex items-center gap-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-2.5 rounded-xl transition-all disabled:opacity-50 active:scale-[0.98];
+  }
+  .btn-success {
+    @apply inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-2.5 rounded-xl transition-all disabled:opacity-50 active:scale-[0.98];
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 text-gray-400 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-xl transition-all;
+  }
+
+  /* Form inputs */
+  .input {
+    @apply bg-gray-800 border border-gray-700 text-gray-100 rounded-xl px-3.5 py-2.5 w-full
+           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+           placeholder-gray-600 transition-all;
+  }
+  .input:focus {
+    background-color: rgba(31, 41, 55, 0.8);
+  }
+  .label {
+    @apply block text-xs font-semibold text-gray-400 mb-1.5 uppercase tracking-wide;
+  }
+
+  /* Badges */
+  .badge-success {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
+           bg-emerald-900/30 text-emerald-400 border border-emerald-800/40;
+  }
+  .badge-danger {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
+           bg-rose-900/30 text-rose-400 border border-rose-800/40;
+  }
+  .badge-warning {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
+           bg-amber-900/30 text-amber-400 border border-amber-800/40;
+  }
+  .badge-info {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
+           bg-blue-900/30 text-blue-400 border border-blue-800/40;
+  }
+
+  /* Section header */
+  .section-header {
+    @apply flex items-center justify-between mb-5;
+  }
+  .section-title {
+    @apply text-lg font-bold text-white;
+  }
+}
+
+/* ── Animations ─────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.25s ease-out;
+}
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+.animate-scale-in {
+  animation: scaleIn 0.2s ease-out;
+}
+
+/* Page transitions */
+main > div {
+  animation: fadeIn 0.2s ease-out;
+}
+
+/* Modal overlay animation */
+.modal-overlay {
+  animation: scaleIn 0.15s ease-out;
+}
+
+/* ── Telegram message preview styles ─────────────────────────────── */
+.telegram-preview {
+  font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #e2e8f0;
+}
+
+.telegram-preview b,
+.telegram-preview strong { font-weight: 700; color: #f1f5f9; }
+
+.telegram-preview i,
+.telegram-preview em { font-style: italic; color: #cbd5e1; }
+
+.telegram-preview u { text-decoration: underline; }
+
+.telegram-preview s { text-decoration: line-through; opacity: 0.65; }
+
+.telegram-preview code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 0.83em;
+  color: #93c5fd;
+}
+
+.telegram-preview pre {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.83em;
+  overflow-x: auto;
+  margin: 4px 0;
+}
+
+.telegram-preview blockquote {
+  border-left: 3px solid #3b82f6;
+  padding-left: 12px;
+  margin: 6px 0;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+/* Spoiler: blurred until hover */
+.telegram-preview .tg-spoiler {
+  background: rgba(148,163,184,0.12);
+  border-radius: 4px;
+  padding: 1px 4px;
+  filter: blur(4px);
+  cursor: pointer;
+  transition: filter 0.25s ease;
+  user-select: none;
+}
+.telegram-preview .tg-spoiler:hover {
+  filter: blur(0);
+}
+
+/* Custom emoji preview badge */
+.telegram-preview .tg-emoji-preview {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(168,85,247,0.12);
+  border: 1px solid rgba(168,85,247,0.3);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 1.1em;
+  cursor: help;
+  vertical-align: middle;
+  transition: background 0.2s;
+}
+.telegram-preview .tg-emoji-preview:hover {
+  background: rgba(168,85,247,0.25);
+}
+
+/* ── Utility: font-mono for code ────────────────────────────────── */
+.font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+}

@@ -1,0 +1,16 @@
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.env
+.env.*
+server/.env
+server/data/*.db
+server/data/*.db-shm
+server/data/*.db-wal
+server/uploads/*
+!server/uploads/.gitkeep
+DBOnly.zip
+*.log
+.DS_Store
+Thumbs.db

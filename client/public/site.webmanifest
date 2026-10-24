@@ -1,0 +1,17 @@
+{
+  "name": "TeleBroadcast Hub - Hệ Thống Phát Tin Telegram",
+  "short_name": "TeleBroadcast",
+  "description": "Hệ thống quản lý, lên lịch và tự động phát tin nhắn Telegram đa tài khoản",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

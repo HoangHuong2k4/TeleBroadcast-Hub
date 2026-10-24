@@ -1,0 +1,12 @@
+{
+  "name": "telebroadcast-hub",
+  "version": "1.0.0",
+  "description": "TeleBroadcast Hub - Monorepo",
+  "scripts": {
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  }
+}
