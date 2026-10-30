@@ -5,11 +5,12 @@ import {
   Play, Hash, AlignLeft, AlignRight, Eye, EyeOff,
   RefreshCw, Settings2, Users, UsersRound, Radio, Clock,
   Sparkles, Layers, Sliders, Calendar, Send, Image, AlertCircle,
-  HelpCircle, ChevronRight, ArrowRight, RotateCcw, Download, Store, Globe, ExternalLink
+  HelpCircle, ChevronRight, ArrowRight, RotateCcw, Download, Store, Globe, ExternalLink, ArrowLeftRight
 } from 'lucide-react'
 import api, { getCurrentUser } from '../utils/api'
 import toast from 'react-hot-toast'
 import GroupAvatar from '../components/GroupAvatar'
+import SyncModal from '../components/SyncModal'
 
 // Helper tạo URL Telegram chuẩn mở trên Web/App
 function getTelegramUrl(identifier) {
@@ -2025,6 +2026,7 @@ export default function Groups() {
   const [filterCluster, setFilterCluster] = useState('all') // all | unassigned | clusterId
   const [filterUser, setFilterUser] = useState('all') // all | user_id
   const [users, setUsers] = useState([])
+  const [showSyncModal, setShowSyncModal] = useState(false)
 
   const currentUser = getCurrentUser()
   const isAdmin = currentUser?.role === 'admin'
@@ -2431,6 +2433,16 @@ export default function Groups() {
                 )
               })}
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowSyncModal(true)}
+              className="ml-auto px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 flex-shrink-0 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-md shadow-indigo-600/20 active:scale-95"
+              title="Đồng bộ nội dung, cụm chợ và nhóm giữa 2 tài khoản (Giữ nguyên khung giờ)"
+            >
+              <ArrowLeftRight size={14} />
+              <span>Đồng bộ tài khoản</span>
+            </button>
           </div>
         )}
 
@@ -3035,6 +3047,15 @@ export default function Groups() {
             setSelected(new Set())
             fetchGroups()
           }}
+        />
+      )}
+
+      {isAdmin && (
+        <SyncModal
+          isOpen={showSyncModal}
+          onClose={() => setShowSyncModal(false)}
+          onSuccess={() => fetchGroups()}
+          users={users}
         />
       )}
 

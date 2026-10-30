@@ -33,6 +33,20 @@ Tài liệu này tổng hợp lại các tính năng và logic đã được xâ
 - Backend `index.js` đã được tích hợp Middleware **HTTP Basic Authentication**. 
 - Để kích hoạt, cấu hình `ADMIN_USER` và `ADMIN_PASS` vào file `.env`. Nếu có, mọi request (kể cả xem giao diện React ở production) đều phải nhập mật khẩu bằng prompt của trình duyệt, chống phá hoại từ bên ngoài.
 
+### E. Tính năng Đồng Bộ Dữ Liệu Tài Khoản (Admin Account Sync)
+- **Mục đích**: Cho phép Quản trị viên (Admin) sao chép / đồng bộ nhanh toàn bộ nội dung, cụm chợ và danh sách nhóm chợ từ một tài khoản nguồn sang tài khoản đích chỉ với 1 click ("bấm sync là xong").
+- **Dữ liệu đồng bộ**:
+  - **Mẫu kịch bản (Templates)**: Tên bài viết, nội dung bài viết, custom emoji, hình ảnh đính kèm.
+  - **Cụm chợ (Clusters)**: Danh sách cụm, màu sắc, tiền tố, hashtag, hậu tố và kịch bản mặc định của cụm.
+  - **Nhóm chợ (Groups)**: Toàn bộ danh sách nhóm Telegram, tự động liên kết đúng cụm chợ và gán kịch bản tương ứng theo quan hệ nhiều-nhiều (`group_templates`).
+  - **Tự động map tài khoản phụ trách**: Nhóm mới tạo của tài khoản đích được tự động gán vào số điện thoại Telegram của chính tài khoản đích (`account_phone`).
+- **Bảo toàn Khung Giờ (Lịch gửi tin)**:
+  - Hệ thống **tuyệt đối KHÔNG** sao chép / ghi đè khung giờ (`schedule_config`, `time_slots`, `custom_time_slots`) từ nguồn sang đích.
+  - Tài khoản đích giữ nguyên hoàn toàn lịch gửi và khung giờ độc lập của mình (tránh gửi tin cùng lúc hoặc spam).
+- **Chế độ đồng bộ**:
+  - *Bổ sung & Cập nhật (Merge)*: Giữ nguyên dữ liệu hiện tại, chỉ thêm các mục mới và cập nhật mục trùng lặp.
+  - *Xóa sạch & Đồng bộ mới (Overwrite)*: Làm mới tài khoản đích giống hoàn toàn tài khoản nguồn (khung giờ vẫn giữ riêng).
+
 ## 3. Quy trình Triển khai (Deployment)
 - Dùng `npm run build` trên thư mục `client`.
 - Express backend sẽ tự động bắt lấy file từ `client/dist` (thông qua `express.static`) để phục vụ UI.

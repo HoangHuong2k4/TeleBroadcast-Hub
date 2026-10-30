@@ -1,12 +1,16 @@
 import { useState, useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
 import { 
   Users, UserPlus, Shield, User, Lock, Edit2, Trash2, 
-  CheckCircle2, XCircle, Search, RefreshCw, KeyRound, Radio
+  CheckCircle2, XCircle, Search, RefreshCw, KeyRound, Radio,
+  ArrowLeftRight, Layers, FileText
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api, { getCurrentUser } from '../utils/api'
+import SyncModal from '../components/SyncModal'
 
 export default function UsersPage() {
+  const location = useLocation()
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
@@ -16,6 +20,19 @@ export default function UsersPage() {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedUser, setSelectedUser] = useState(null)
+
+  // Sync modal states
+  const [showSyncModal, setShowSyncModal] = useState(false)
+  const [syncSourceId, setSyncSourceId] = useState(null)
+  const [syncTargetId, setSyncTargetId] = useState(null)
+
+  // Tự động mở Sync modal nếu truy cập kèm ?sync=true
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    if (params.get('sync') === 'true') {
+      setShowSyncModal(true)
+    }
+  }, [location.search])
 
   // Form states
   const [formData, setFormData] = useState({
@@ -123,6 +140,24 @@ export default function UsersPage() {
     }
   }
 
+  const handleOpenSync = (user) => {
+    if (user) {
+      if (user.id === currentUser?.id) {
+        setSyncSourceId(user.id)
+        const other = users.find(u => u.id !== user.id)
+        setSyncTargetId(other ? other.id : '')
+      } else {
+        setSyncSourceId(currentUser?.id || (users.find(u => u.id !== user.id)?.id))
+        setSyncTargetId(user.id)
+      }
+    } else {
+      setSyncSourceId(currentUser?.id || (users[0]?.id || ''))
+      const other = users.find(u => u.id !== (currentUser?.id || users[0]?.id))
+      setSyncTargetId(other ? other.id : '')
+    }
+    setShowSyncModal(true)
+  }
+
   const filteredUsers = users.filter(u => 
     u.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (u.display_name && u.display_name.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -144,13 +179,24 @@ export default function UsersPage() {
           </p>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium shadow-lg shadow-blue-600/20 transition-all self-start sm:self-auto"
-        >
-          <UserPlus size={18} />
-          <span>Tạo tài khoản mới</span>
-        </button>
+        <div className="flex items-center gap-2.5 self-start sm:self-auto flex-wrap">
+          <button
+            onClick={() => handleOpenSync(null)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-sm font-semibold shadow-lg shadow-indigo-600/25 transition-all active:scale-95"
+            title="Đồng bộ nội dung, cụm chợ và nhóm giữa 2 tài khoản (Giữ nguyên khung giờ)"
+          >
+            <ArrowLeftRight size={17} />
+            <span>Đồng bộ tài khoản</span>
+          </button>
+
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium shadow-lg shadow-blue-600/20 transition-all"
+          >
+            <UserPlus size={18} />
+            <span>Tạo tài khoản mới</span>
+          </button>
+        </div>
       </div>
 
       {/* Filter Bar */}
@@ -184,6 +230,8 @@ export default function UsersPage() {
                 <th className="py-3.5 px-4 font-semibold">Vai trò</th>
                 <th className="py-3.5 px-4 font-semibold text-center">Acc Telegram</th>
                 <th className="py-3.5 px-4 font-semibold text-center">Nhóm sở hữu</th>
+                <th className="py-3.5 px-4 font-semibold text-center">Cụm chợ</th>
+                <th className="py-3.5 px-4 font-semibold text-center">Kịch bản</th>
                 <th className="py-3.5 px-4 font-semibold">Trạng thái</th>
                 <th className="py-3.5 px-4 font-semibold">Ngày tạo</th>
                 <th className="py-3.5 px-4 font-semibold text-right">Thao tác</th>
@@ -192,14 +240,14 @@ export default function UsersPage() {
             <tbody className="divide-y divide-gray-800/60 text-sm">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-gray-500">
+                  <td colSpan={9} className="py-12 text-center text-gray-500">
                     <RefreshCw size={24} className="mx-auto animate-spin mb-2 text-blue-500" />
                     Đang tải danh sách người dùng...
                   </td>
                 </tr>
               ) : filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-gray-500">
+                  <td colSpan={9} className="py-12 text-center text-gray-500">
                     Không tìm thấy người dùng nào phù hợp.
                   </td>
                 </tr>
@@ -254,6 +302,16 @@ export default function UsersPage() {
                           {user.groups_count || 0}
                         </span>
                       </td>
+                      <td className="py-3.5 px-4 text-center">
+                        <span className="text-gray-300 font-medium">
+                          {user.clusters_count || 0}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-center">
+                        <span className="text-gray-300 font-medium">
+                          {user.templates_count || 0}
+                        </span>
+                      </td>
                       <td className="py-3.5 px-4">
                         {user.is_active ? (
                           <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
@@ -272,6 +330,13 @@ export default function UsersPage() {
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => handleOpenSync(user)}
+                            className="p-1.5 text-gray-400 hover:text-indigo-400 hover:bg-gray-800 rounded-lg transition-colors"
+                            title="Đồng bộ dữ liệu với tài khoản này"
+                          >
+                            <ArrowLeftRight size={16} />
+                          </button>
                           <button
                             onClick={() => handleOpenEdit(user)}
                             className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-800 rounded-lg transition-colors"
@@ -455,6 +520,16 @@ export default function UsersPage() {
           </div>
         </div>
       )}
+
+      {/* Modal Đồng Bộ Dữ Liệu Tài Khoản */}
+      <SyncModal
+        isOpen={showSyncModal}
+        onClose={() => setShowSyncModal(false)}
+        onSuccess={() => fetchUsers()}
+        users={users}
+        initialSourceId={syncSourceId}
+        initialTargetId={syncTargetId}
+      />
     </div>
   )
 }

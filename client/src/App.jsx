@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, UsersRound, FileText,
   Clock, ClipboardList, Menu, X, Radio, UserCog,
   LogOut, ChevronDown, Shield, User as UserIcon,
-  Store, Layers
+  Store, Layers, ArrowLeftRight
 } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 
@@ -104,6 +104,7 @@ function Sidebar({ open, setOpen }) {
 
   const adminItems = [
     { to: '/users', icon: UserCog, label: 'Người dùng' },
+    { to: '/users?sync=true', icon: ArrowLeftRight, label: 'Đồng bộ tài khoản' },
   ]
 
   return (

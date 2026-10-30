@@ -4,10 +4,11 @@ import {
   Sparkles, X, AlertCircle, CheckCircle, Copy, Check,
   Bold, Italic, Underline, Strikethrough, Code, Quote, Smile, EyeOff,
   Download, Link, CheckCircle2, Upload, FileText, RefreshCw, Search,
-  Filter, User as UserIcon, Layers, ExternalLink, ZoomIn, MessageSquare
+  Filter, User as UserIcon, Layers, ExternalLink, ZoomIn, MessageSquare, ArrowLeftRight
 } from 'lucide-react'
 import api, { getCurrentUser } from '../utils/api'
 import toast from 'react-hot-toast'
+import SyncModal from '../components/SyncModal'
 
 // ─── Helper: Clean Snippet for Table View ────────────────────────────────────
 function cleanSnippet(text) {
@@ -996,6 +997,7 @@ export default function Templates() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [zoomImage, setZoomImage] = useState(null)
   const [activeSpintaxContent, setActiveSpintaxContent] = useState(null)
+  const [showSyncModal, setShowSyncModal] = useState(false)
 
   const currentUser = getCurrentUser()
   const isAdmin = currentUser?.role === 'admin'
@@ -1253,6 +1255,16 @@ export default function Templates() {
                 <span className="text-[10px] bg-black/40 px-1.5 py-0.2 rounded-full">
                   {templates.filter(t => Number(t.user_id) === 2).length}
                 </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(true)}
+                className="px-3 py-1 rounded-lg font-bold text-xs transition-all flex items-center gap-1.5 flex-shrink-0 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-sm shadow-indigo-600/20 active:scale-95 ml-1"
+                title="Đồng bộ nội dung, cụm chợ và nhóm giữa 2 tài khoản (Giữ nguyên khung giờ)"
+              >
+                <ArrowLeftRight size={13} />
+                <span>Đồng bộ</span>
               </button>
             </div>
           )}
@@ -1609,6 +1621,15 @@ export default function Templates() {
         <SpintaxPreviewModal
           content={activeSpintaxContent}
           onClose={() => setActiveSpintaxContent(null)}
+        />
+      )}
+
+      {isAdmin && (
+        <SyncModal
+          isOpen={showSyncModal}
+          onClose={() => setShowSyncModal(false)}
+          onSuccess={() => fetchTemplates()}
+          users={users}
         />
       )}
     </div>
