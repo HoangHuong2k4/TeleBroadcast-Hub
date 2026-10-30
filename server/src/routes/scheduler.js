@@ -179,14 +179,22 @@ router.post('/run-now', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Dispatcher đang chạy. Vui lòng đợi.' });
     }
 
+    const db = getDb();
+    const targetUserId = req.body.user_id ? parseInt(req.body.user_id) : req.user.id;
+    const targetGroups = db.prepare('SELECT * FROM groups WHERE user_id = ? AND is_active = 1').all(targetUserId);
+
+    if (!targetGroups || targetGroups.length === 0) {
+      return res.status(400).json({ success: false, error: 'Không có nhóm nào đang bật để phát tin' });
+    }
+
     // Chạy bất đồng bộ và trả về ngay
-    dispatch().then(result => {
-      console.log('Manual dispatch kết thúc:', result);
+    dispatch(null, true, targetGroups).then(result => {
+      console.log(`Manual dispatch (User: ${targetUserId}) kết thúc:`, result);
     }).catch(err => {
       console.error('Manual dispatch lỗi:', err);
     });
 
-    res.json({ success: true, message: 'Bắt đầu gửi tin. Xem nhật ký để theo dõi tiến trình.' });
+    res.json({ success: true, message: `Bắt đầu gửi tin cho ${targetGroups.length} nhóm. Xem nhật ký để theo dõi tiến trình.` });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

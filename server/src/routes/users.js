@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { getDb } = require('../db/database');
 const { authMiddleware, adminOnly } = require('../middleware/auth');
+const { canonicalizeIdentifier } = require('../utils/identifier');
 
 // Toàn bộ routes người dùng bắt buộc phải là Admin
 router.use(authMiddleware);
@@ -379,10 +380,12 @@ router.post('/sync', (req, res) => {
         const findGroupStmt = db.prepare('SELECT id, schedule_mode, custom_time_slots, account_phone FROM groups WHERE user_id = ? AND identifier = ?');
 
         for (const sg of sourceGroups) {
+          const canonIdent = canonicalizeIdentifier(sg.identifier);
+          if (!canonIdent) continue;
           const mappedClusterId = sg.cluster_id ? (clusterMap[sg.cluster_id] || null) : null;
 
           if (mode === 'merge') {
-            const existing = findGroupStmt.get(targetId, sg.identifier);
+            const existing = findGroupStmt.get(targetId, canonIdent);
             if (existing) {
               // Cập nhật thông tin nội dung, rules, cụm chợ.
               // TUYỆT ĐỐI KHÔNG cập nhật schedule_mode và custom_time_slots
@@ -409,7 +412,7 @@ router.post('/sync', (req, res) => {
             } else {
               // Tạo mới cho target user với khung giờ riêng của target
               const res = insertGroupStmt.run(
-                sg.identifier,
+                canonIdent,
                 sg.title,
                 targetId,
                 targetPhone,
@@ -434,7 +437,7 @@ router.post('/sync', (req, res) => {
           } else {
             // mode === 'overwrite'
             const res = insertGroupStmt.run(
-              sg.identifier,
+              canonIdent,
               sg.title,
               targetId,
               targetPhone,

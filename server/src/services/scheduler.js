@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const { getDb } = require('../db/database');
 const { sendMessage, reconnectAllAccounts, updateAccountStatus } = require('./telegramClient');
 const { unspin } = require('../utils/spintax');
+const { canonicalizeIdentifier } = require('../utils/identifier');
 const path = require('path');
 const fs = require('fs');
 
@@ -156,10 +157,21 @@ async function dispatch(targetGroupId = null, isManual = false, specificGroups =
 
   console.log(`🚀 Bắt đầu phát tin: ${groups.length} nhóm (Manual: ${isManual})`);
 
+  const dispatchedInThisRun = new Set();
+
   for (let i = 0; i < groups.length; i++) {
     if (!isRunning) break;
 
     const group = groups[i];
+
+    // Chống gửi trùng lặp đích đến trong cùng 1 phiên phát tin
+    const destKey = `${group.user_id || 0}::${canonicalizeIdentifier(group.identifier)}`;
+    if (dispatchedInThisRun.has(destKey)) {
+      console.warn(`🛡️ [Anti-Duplicate] Bỏ qua nhóm ${group.identifier} (ID: ${group.id}) vì đích đến này đã được gửi trong phiên chạy.`);
+      currentRun.done = i + 1;
+      continue;
+    }
+    dispatchedInThisRun.add(destKey);
 
     // Reset bộ đếm số lần gửi hôm nay nếu qua ngày mới
     let sentToday = group.sent_today_count || 0;
@@ -442,9 +454,19 @@ async function checkAndDispatchMinute() {
   });
 
   if (eligibleGroups.length > 0) {
+    const uniqueEligible = [];
+    const seen = new Set();
+    for (const grp of eligibleGroups) {
+      const key = `${grp.user_id || 0}::${canonicalizeIdentifier(grp.identifier)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueEligible.push(grp);
+      }
+    }
+
     lastDispatchedMinute = minuteKey;
-    console.log(`⏰ [Trigger ${currentSlot} VN] Tìm thấy ${eligibleGroups.length} nhóm đủ điều kiện phát tin.`);
-    await dispatch(null, false, eligibleGroups);
+    console.log(`⏰ [Trigger ${currentSlot} VN] Tìm thấy ${uniqueEligible.length} nhóm đủ điều kiện phát tin (sau khi lọc trùng).`);
+    await dispatch(null, false, uniqueEligible);
   }
 }
 

@@ -7,6 +7,7 @@ const { authMiddleware } = require('../middleware/auth');
 const { unspin } = require('../utils/spintax');
 const { dispatch, composeGroupMessage } = require('../services/scheduler');
 const { fetchTelegramGroupMeta } = require('../utils/telegramMeta');
+const { canonicalizeIdentifier } = require('../utils/identifier');
 
 router.use(authMiddleware);
 
@@ -120,16 +121,8 @@ router.post('/', async (req, res) => {
       const parsedIdents = [];
       const insertMany = db.transaction(() => {
         for (const line of lines) {
-          let ident = line.trim();
-          if (ident.includes('t.me/')) {
-            if (!ident.startsWith('http')) ident = 'https://' + ident;
-            const parts = ident.split('t.me/')[1].split('/');
-            if (parts.length === 1 && !parts[0].startsWith('+')) {
-              ident = '@' + parts[0];
-            }
-          } else if (!ident.startsWith('@') && !ident.startsWith('-') && !ident.startsWith('+') && !ident.startsWith('http')) {
-            ident = '@' + ident;
-          }
+          const ident = canonicalizeIdentifier(line);
+          if (!ident) continue;
 
           parsedIdents.push(ident);
 
@@ -182,15 +175,9 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Thiếu identifier' });
     }
 
-    let ident = identifier.trim();
-    if (ident.includes('t.me/')) {
-      if (!ident.startsWith('http')) ident = 'https://' + ident;
-      const parts = ident.split('t.me/')[1].split('/');
-      if (parts.length === 1 && !parts[0].startsWith('+')) {
-        ident = '@' + parts[0];
-      }
-    } else if (!ident.startsWith('@') && !ident.startsWith('-') && !ident.startsWith('+') && !ident.startsWith('http')) {
-      ident = '@' + ident;
+    const ident = canonicalizeIdentifier(identifier);
+    if (!ident) {
+      return res.status(400).json({ success: false, error: 'Định dạng identifier không hợp lệ' });
     }
 
     // Tự động lấy Avatar & Tên nhóm thực tế từ Telegram
@@ -917,16 +904,8 @@ router.post('/import-json', (req, res) => {
     const insertMany = db.transaction(() => {
       for (const item of items) {
         if (!item.identifier) continue;
-        let ident = String(item.identifier).trim();
-        if (ident.includes('t.me/')) {
-          if (!ident.startsWith('http')) ident = 'https://' + ident;
-          const parts = ident.split('t.me/')[1].split('/');
-          if (parts.length === 1 && !parts[0].startsWith('+')) {
-            ident = '@' + parts[0];
-          }
-        } else if (!ident.startsWith('@') && !ident.startsWith('-') && !ident.startsWith('+') && !ident.startsWith('http')) {
-          ident = '@' + ident;
-        }
+        const ident = canonicalizeIdentifier(item.identifier);
+        if (!ident) continue;
 
         const title = item.title ? String(item.title).trim() : ident;
         const slots = typeof item.custom_time_slots === 'string'
