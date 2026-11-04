@@ -6,6 +6,8 @@ const { getDb } = require('../db/database');
 const activeClients = new Map();
 // Lưu trữ các phone code hash tạm thời
 const pendingAuth = new Map();
+// Tránh việc nhiều request cùng lúc tạo duplicate client cho cùng 1 số điện thoại
+const connectingPromises = new Map();
 
 /**
  * Tạo TelegramClient mới
@@ -44,12 +46,10 @@ function createClient(apiId, apiHash, sessionString = '') {
 function isAuthError(err) {
   if (!err) return false;
   const msg = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
-  return msg.includes('AUTH_KEY_DUPLICATED') ||
-         msg.includes('AUTH_KEY_UNREGISTERED') ||
+  return msg.includes('AUTH_KEY_UNREGISTERED') ||
          msg.includes('SESSION_REVOKED') ||
          msg.includes('SESSION_EXPIRED') ||
          msg.includes('USER_DEACTIVATED') ||
-         err.code === 406 ||
          err.code === 401;
 }
 
@@ -64,38 +64,79 @@ function handleAuthError(phone) {
 
 /**
  * Lấy client đang hoạt động hoặc tạo mới từ session lưu trong DB
+ * Đảm bảo singleton cho mỗi số điện thoại: không bao giờ mở 2 connection cùng 1 session song song
  */
 async function getOrCreateClient(phone) {
-  if (activeClients.has(phone)) {
-    const client = activeClients.get(phone);
-    if (client.connected) return client;
+  if (connectingPromises.has(phone)) {
+    return await connectingPromises.get(phone);
   }
 
-  const db = getDb();
-  const account = db.prepare('SELECT * FROM accounts WHERE phone = ?').get(phone);
-  if (!account || !account.session_string) {
-    throw new Error('Tài khoản chưa được xác thực hoặc không tồn tại');
-  }
+  const connectTask = (async () => {
+    // 1. Kiểm tra client hiện tại trong memory
+    if (activeClients.has(phone)) {
+      const existingClient = activeClients.get(phone);
+      if (existingClient.connected) {
+        return existingClient;
+      }
+      // Thử reconnect client hiện tại trước
+      try {
+        await existingClient.connect();
+        if (existingClient.connected) {
+          updateAccountStatus(phone, 'connected');
+          return existingClient;
+        }
+      } catch (connErr) {
+        console.warn(`[Telegram] Reconnect client cũ cho ${phone} thất bại:`, connErr.message);
+      }
 
-  const client = createClient(account.api_id, account.api_hash, account.session_string);
+      // Nếu không reconnect được, ngắt kết nối sạch trước khi tạo mới để tránh AUTH_KEY_DUPLICATED
+      try {
+        await existingClient.disconnect();
+      } catch (_) {}
+      activeClients.delete(phone);
+    }
+
+    // 2. Lấy session từ DB
+    const db = getDb();
+    const account = db.prepare('SELECT * FROM accounts WHERE phone = ?').get(phone);
+    if (!account || !account.session_string) {
+      throw new Error('Tài khoản chưa được xác thực hoặc không tồn tại');
+    }
+
+    const client = createClient(account.api_id, account.api_hash, account.session_string);
+    try {
+      await client.connect();
+
+      if (!await client.checkAuthorization()) {
+        handleAuthError(phone);
+        throw new Error(`Session của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác, cần đăng nhập lại`);
+      }
+    } catch (err) {
+      if (isAuthError(err)) {
+        handleAuthError(phone);
+        throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác. Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
+      }
+
+      const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
+      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
+        try { await client.disconnect(); } catch (_) {}
+        activeClients.delete(phone);
+        throw new Error(`Xung đột kết nối Telegram (${phone}): Phiên đang được kết nối từ nơi khác. Đã đặt lại kết nối, vui lòng thử lại sau vài giây.`);
+      }
+      throw err;
+    }
+
+    activeClients.set(phone, client);
+    updateAccountStatus(phone, 'connected');
+    return client;
+  })();
+
+  connectingPromises.set(phone, connectTask);
   try {
-    await client.connect();
-    
-    if (!await client.checkAuthorization()) {
-      handleAuthError(phone);
-      throw new Error(`Session của ${phone} đã hết hạn, cần đăng nhập lại`);
-    }
-  } catch (err) {
-    if (isAuthError(err)) {
-      handleAuthError(phone);
-      throw new Error(`Tài khoản Telegram (${phone}) đã hết hạn phiên hoặc bị đăng xuất trên thiết bị khác (AUTH_KEY_DUPLICATED). Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
-    }
-    throw err;
+    return await connectTask;
+  } finally {
+    connectingPromises.delete(phone);
   }
-
-  activeClients.set(phone, client);
-  updateAccountStatus(phone, 'connected');
-  return client;
 }
 
 /**
@@ -256,7 +297,16 @@ async function sendMessage(phone, groupIdentifier, messageText, imagePath = null
     } catch (err) {
       if (isAuthError(err)) {
         handleAuthError(phone);
-        throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy (AUTH_KEY_DUPLICATED). Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
+        throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác. Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
+      }
+      const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
+      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
+        if (activeClients.has(phone)) {
+          const c = activeClients.get(phone);
+          try { await c.disconnect(); } catch (_) {}
+          activeClients.delete(phone);
+        }
+        throw new Error(`Xung đột phiên Telegram (AUTH_KEY_DUPLICATED). Đã đặt lại kết nối cho nhóm kế tiếp.`);
       }
       throw new Error(`Không tìm thấy nhóm "${groupIdentifier}": ${err.message}`);
     }
@@ -288,13 +338,26 @@ async function sendMessage(phone, groupIdentifier, messageText, imagePath = null
   } catch (err) {
     if (isAuthError(err)) {
       handleAuthError(phone);
-      throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy (AUTH_KEY_DUPLICATED). Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
+      throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác. Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
+    }
+    const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
+    if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
+      if (activeClients.has(phone)) {
+        const c = activeClients.get(phone);
+        try { await c.disconnect(); } catch (_) {}
+        activeClients.delete(phone);
+      }
+      throw new Error(`Xung đột phiên Telegram (AUTH_KEY_DUPLICATED). Đã đặt lại kết nối cho nhóm kế tiếp.`);
     }
     if (err.errorMessage && err.errorMessage.includes('FLOOD_WAIT')) {
       const seconds = parseInt(err.errorMessage.split('_').pop()) || 60;
       const until = Date.now() + seconds * 1000;
       updateAccountStatus(phone, 'flood_wait', until);
       throw new Error(`FLOOD_WAIT:${seconds}`);
+    }
+    if (err.code === 420 || err.constructor?.name === 'SlowModeWaitError') {
+      const waitSeconds = err.seconds || (err.message && err.message.match(/(\d+)\s*seconds/)?.[1]) || 'vài';
+      throw new Error(`Nhóm bật Slow Mode: cần đợi ${waitSeconds}s mới được gửi tin tiếp theo.`);
     }
     throw err;
   }

@@ -331,8 +331,8 @@ async function dispatch(targetGroupId = null, isManual = false, specificGroups =
         break;
       }
 
-      if (errMsg.includes('AUTH_KEY_DUPLICATED') || errMsg.includes('hết hạn') || errMsg.includes('bị hủy')) {
-        console.warn(`🛑 Dừng các nhóm còn lại do tài khoản ${account.phone} bị lỗi phiên (AUTH_KEY_DUPLICATED).`);
+      if (errMsg.includes('SESSION_REVOKED') || errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('hết hạn hoặc bị hủy trên thiết bị khác')) {
+        console.warn(`🛑 Dừng các nhóm còn lại do phiên tài khoản ${account.phone} đã hết hạn hoặc bị hủy.`);
         writeLog(group.identifier, group.title, templateId, templateName, 'failed', errMsg, group.user_id);
         failCount++;
         currentRun.fail++;

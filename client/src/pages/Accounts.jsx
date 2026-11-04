@@ -242,6 +242,7 @@ export default function Accounts() {
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [reconnectAccount, setReconnectAccount] = useState(null)
+  const [reconnectingId, setReconnectingId] = useState(null)
 
   const fetchAccounts = async () => {
     try {
@@ -272,6 +273,23 @@ export default function Accounts() {
       fetchAccounts()
     } catch (err) {
       toast.error(err.message)
+    }
+  }
+
+  const handleReconnect = async (id) => {
+    try {
+      setReconnectingId(id)
+      const res = await api.post(`/accounts/${id}/reconnect`)
+      if (res.success) {
+        toast.success(res.message || 'Kết nối lại tài khoản thành công!')
+        fetchAccounts()
+      } else {
+        toast.error(res.error || 'Kết nối lại thất bại')
+      }
+    } catch (err) {
+      toast.error(err.message || 'Không thể kết nối lại')
+    } finally {
+      setReconnectingId(null)
     }
   }
 
@@ -399,9 +417,11 @@ export default function Accounts() {
                 })()}
 
                 {(!acc.is_online && acc.status !== 'connected') && (
-                  <div className="mt-2.5 p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/40 text-xs text-rose-300 flex items-center gap-2">
-                    <AlertCircle size={15} className="text-rose-400 flex-shrink-0" />
-                    <span>Phiên Telegram đã bị hủy hoặc hết hạn (AUTH_KEY_DUPLICATED). Hãy bấm <strong>Kết nối lại OTP</strong> bên phải để đăng nhập lại.</span>
+                  <div className="mt-2.5 p-2.5 rounded-xl bg-amber-950/40 border border-amber-800/40 text-xs text-amber-300 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle size={15} className="text-amber-400 flex-shrink-0" />
+                      <span>Tài khoản đang tạm ngắt kết nối. Bấm <strong>Thử kết nối lại</strong> bên phải để kích hoạt lại phiên (không cần OTP), hoặc <strong>Đăng nhập lại OTP</strong> nếu bạn đã đổi thiết bị.</span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -409,14 +429,25 @@ export default function Accounts() {
               {/* Actions */}
               <div className="flex items-center gap-2 flex-shrink-0">
                 {(!acc.is_online && acc.status !== 'connected') && (
-                  <button
-                    onClick={() => { setReconnectAccount(acc); setShowModal(true) }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
-                    title="Đăng nhập lại OTP Telegram"
-                  >
-                    <LogIn size={14} />
-                    Kết nối lại OTP
-                  </button>
+                  <>
+                    <button
+                      onClick={() => handleReconnect(acc.id)}
+                      disabled={reconnectingId === acc.id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white rounded-xl text-xs font-semibold shadow-md shadow-emerald-600/30 transition-all"
+                      title="Kết nối lại ngay bằng phiên hiện có (không cần mã OTP)"
+                    >
+                      <RefreshCw size={14} className={reconnectingId === acc.id ? 'animate-spin' : ''} />
+                      {reconnectingId === acc.id ? 'Đang kết nối...' : 'Thử kết nối lại'}
+                    </button>
+                    <button
+                      onClick={() => { setReconnectAccount(acc); setShowModal(true) }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
+                      title="Đăng nhập lại OTP Telegram"
+                    >
+                      <LogIn size={14} />
+                      Đăng nhập lại OTP
+                    </button>
+                  </>
                 )}
                 <button
                   onClick={() => fetchAccounts()}

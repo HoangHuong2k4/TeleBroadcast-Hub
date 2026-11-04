@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
-const { sendOtp, verifyOtp, disconnectClient, getActiveClients } = require('../services/telegramClient');
+const { sendOtp, verifyOtp, disconnectClient, getOrCreateClient, getActiveClients, updateAccountStatus } = require('../services/telegramClient');
 const { authMiddleware } = require('../middleware/auth');
 
 router.use(authMiddleware);
@@ -129,6 +129,45 @@ router.post('/:id/disconnect', async (req, res) => {
 
     await disconnectClient(account.phone);
     res.json({ success: true, message: 'Đã ngắt kết nối' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/accounts/:id/reconnect - Thử kết nối lại tài khoản có session sẵn mà không cần OTP
+router.post('/:id/reconnect', async (req, res) => {
+  try {
+    const db = getDb();
+    const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Tài khoản không tồn tại' });
+    }
+
+    if (req.user.role !== 'admin' && account.user_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: 'Bạn không có quyền kết nối tài khoản này' });
+    }
+
+    if (!account.session_string) {
+      return res.status(400).json({ success: false, error: 'Tài khoản chưa có phiên đăng nhập, vui lòng bấm "Đăng nhập lại OTP"' });
+    }
+
+    const client = await getOrCreateClient(account.phone);
+    let meName = account.phone;
+    try {
+      const me = await client.getMe();
+      if (me) {
+        meName = `@${me.username || me.firstName || account.phone}`;
+        db.prepare('UPDATE accounts SET username = ?, first_name = ? WHERE id = ?')
+          .run(me.username || '', me.firstName || '', account.id);
+      }
+    } catch (_) {}
+
+    updateAccountStatus(account.phone, 'connected');
+
+    res.json({
+      success: true,
+      message: `Kết nối lại tài khoản Telegram ${meName} thành công!`
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
