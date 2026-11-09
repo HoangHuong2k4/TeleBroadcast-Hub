@@ -14,6 +14,42 @@ let minuteTickerJob = null;
 let isRunning = false;
 let currentRun = null;
 let lastDispatchedMinute = null;
+let activeRunId = 0;
+let lastActivityAt = 0;
+let cancelCurrentDelay = null;
+let activeGroupsQueue = [];
+let activeDispatchedSet = new Set();
+
+// Thời gian tối đa không có phản hồi trước khi tự động giải phóng khóa (2.5 phút)
+const STALE_RUN_TIMEOUT_MS = 150 * 1000;
+
+/**
+ * Kiểm tra và tự động mở khóa nếu đợt phát tin trước bị treo quá thời gian
+ */
+function checkAndRecoverStaleRun() {
+  if (isRunning && lastActivityAt > 0 && (Date.now() - lastActivityAt > STALE_RUN_TIMEOUT_MS)) {
+    console.warn(`⚠️ [Watchdog] Phát hiện tiến trình gửi tin bị treo quá ${Math.round((Date.now() - lastActivityAt) / 1000)}s. Tự động giải phóng khóa Dispatcher!`);
+    stopDispatch();
+  }
+  if (!isRunning && currentRun !== null) {
+    currentRun = null;
+  }
+}
+
+/**
+ * Bọc Promise với timeout cứng cho từng nhóm
+ */
+function withGroupTimeout(promise, ms, groupIdent) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Quá thời gian gửi tin (${Math.round(ms / 1000)}s) cho nhóm ${groupIdent}`));
+    }, ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 /**
  * Trộn ngẫu nhiên mảng (Fisher-Yates shuffle)
@@ -28,11 +64,21 @@ function shuffleArray(arr) {
 }
 
 /**
- * Ngủ trong khoảng thời gian ngẫu nhiên
+ * Ngủ trong khoảng thời gian ngẫu nhiên (hỗ trợ hủy ngay khi bấm Dừng)
  */
 function randomDelay(minSec, maxSec) {
   const ms = (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      cancelCurrentDelay = null;
+      resolve();
+    }, ms);
+    cancelCurrentDelay = () => {
+      clearTimeout(timer);
+      cancelCurrentDelay = null;
+      resolve();
+    };
+  });
 }
 
 /**
@@ -106,10 +152,7 @@ function getTodayVN() {
  * @param {Array|null} specificGroups - Danh sách nhóm cụ thể cần gửi
  */
 async function dispatch(targetGroupId = null, isManual = false, specificGroups = null) {
-  if (isRunning) {
-    console.log('⏳ Dispatcher đang chạy, bỏ qua lần này');
-    return { skipped: true, reason: 'Dispatcher đang chạy' };
-  }
+  checkAndRecoverStaleRun();
 
   const db = getDb();
   const today = getTodayVN();
@@ -129,9 +172,6 @@ async function dispatch(targetGroupId = null, isManual = false, specificGroups =
     return { skipped: true, reason: 'Không có nhóm' };
   }
 
-  // Lấy kho kịch bản chung (Master Templates active)
-  const allMasterTemplates = db.prepare('SELECT * FROM templates WHERE is_active = 1').all();
-
   // Lấy cài đặt trễ và trộn nhóm
   const settings = db.prepare('SELECT key, value FROM settings').all();
   const settingsMap = Object.fromEntries(settings.map(s => [s.key, s.value]));
@@ -143,224 +183,280 @@ async function dispatch(targetGroupId = null, isManual = false, specificGroups =
     groups = shuffleArray(groups);
   }
 
+  // Nếu Dispatcher đang chạy (và không bị treo), tự động gộp nhóm mới vào hàng đợi đang chạy thay vì báo lỗi bận!
+  if (isRunning && currentRun) {
+    let addedCount = 0;
+    for (const g of groups) {
+      const destKey = `${g.user_id || 0}::${canonicalizeIdentifier(g.identifier)}`;
+      const alreadyQueued = activeGroupsQueue.some(
+        existing => `${existing.user_id || 0}::${canonicalizeIdentifier(existing.identifier)}` === destKey
+      );
+      if (!alreadyQueued && !activeDispatchedSet.has(destKey)) {
+        activeGroupsQueue.push({ ...g, _forceManual: isManual });
+        addedCount++;
+      } else if (isManual && !alreadyQueued) {
+        // Nếu người dùng chủ động bấm gửi thủ công thì cho phép gửi lại dù trong đợt trước đã gửi
+        activeDispatchedSet.delete(destKey);
+        activeGroupsQueue.push({ ...g, _forceManual: true });
+        addedCount++;
+      }
+    }
+    if (addedCount > 0) {
+      currentRun.total = activeGroupsQueue.length;
+      lastActivityAt = Date.now();
+      console.log(`📥 Đã thêm ${addedCount} nhóm vào hàng đợi đang chạy (Tổng cộng: ${currentRun.total} nhóm)`);
+    } else {
+      console.log('ℹ️ Các nhóm yêu cầu đã có sẵn trong hàng đợi đang chạy.');
+    }
+    return { queued: true, added: addedCount, total: currentRun.total };
+  }
+
+  // Lấy kho kịch bản chung (Master Templates active)
+  const allMasterTemplates = db.prepare('SELECT * FROM templates WHERE is_active = 1').all();
+
+  const myRunId = ++activeRunId;
   isRunning = true;
+  lastActivityAt = Date.now();
+  activeGroupsQueue = groups.map(g => ({ ...g, _forceManual: isManual }));
+  activeDispatchedSet = new Set();
+
   let successCount = 0;
   let failCount = 0;
 
   currentRun = {
     startedAt: new Date().toISOString(),
-    total: groups.length,
+    total: activeGroupsQueue.length,
     done: 0,
     success: 0,
     fail: 0,
   };
 
-  console.log(`🚀 Bắt đầu phát tin: ${groups.length} nhóm (Manual: ${isManual})`);
+  console.log(`🚀 Bắt đầu phát tin (Run #${myRunId}): ${activeGroupsQueue.length} nhóm (Manual: ${isManual})`);
 
-  const dispatchedInThisRun = new Set();
+  try {
+    for (let i = 0; i < activeGroupsQueue.length; i++) {
+      if (!isRunning || myRunId !== activeRunId) break;
 
-  for (let i = 0; i < groups.length; i++) {
-    if (!isRunning) break;
+      lastActivityAt = Date.now();
+      const group = activeGroupsQueue[i];
+      const groupIsManual = Boolean(isManual || group._forceManual);
 
-    const group = groups[i];
-
-    // Chống gửi trùng lặp đích đến trong cùng 1 phiên phát tin
-    const destKey = `${group.user_id || 0}::${canonicalizeIdentifier(group.identifier)}`;
-    if (dispatchedInThisRun.has(destKey)) {
-      console.warn(`🛡️ [Anti-Duplicate] Bỏ qua nhóm ${group.identifier} (ID: ${group.id}) vì đích đến này đã được gửi trong phiên chạy.`);
-      currentRun.done = i + 1;
-      continue;
-    }
-    dispatchedInThisRun.add(destKey);
-
-    // Reset bộ đếm số lần gửi hôm nay nếu qua ngày mới
-    let sentToday = group.sent_today_count || 0;
-    if (group.last_sent_date !== today) {
-      sentToday = 0;
-      db.prepare('UPDATE groups SET sent_today_count = 0, last_sent_date = ? WHERE id = ?').run(today, group.id);
-    }
-
-    // Kiểm tra giới hạn số lần gửi trong ngày (nếu chạy tự động)
-    if (!isManual && group.max_repeats_per_day > 0 && sentToday >= group.max_repeats_per_day) {
-      console.log(`⏭️ [${i + 1}/${groups.length}] Nhóm ${group.identifier} đã đạt tối đa ${sentToday}/${group.max_repeats_per_day} lần/ngày → Bỏ qua.`);
-      currentRun.done = i + 1;
-      continue;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // 1. Xác định Kịch bản (Kịch bản Riêng vs Kịch bản Chung)
-    // ─────────────────────────────────────────────────────────────
-    let baseContent = '';
-    let imagePath = null;
-    let templateId = null;
-    let templateName = 'Kịch bản chung';
-
-    const isCustomTemplate = group.template_mode === 'custom' && group.custom_content && group.custom_content.trim();
-
-    if (isCustomTemplate) {
-      // 🎯 Dùng KỊCH BẢN RIÊNG của nhóm này
-      baseContent = group.custom_content;
-      templateId = null;
-      templateName = 'Kịch bản riêng của nhóm';
-
-      if (group.custom_image_path) {
-        const resolvedPath = path.resolve(process.env.UPLOADS_DIR || './uploads', group.custom_image_path);
-        if (fs.existsSync(resolvedPath)) {
-          imagePath = resolvedPath;
-        }
+      // Chống gửi trùng lặp đích đến trong cùng 1 phiên phát tin
+      const destKey = `${group.user_id || 0}::${canonicalizeIdentifier(group.identifier)}`;
+      if (activeDispatchedSet.has(destKey)) {
+        console.warn(`🛡️ [Anti-Duplicate] Bỏ qua nhóm ${group.identifier} (ID: ${group.id}) vì đích đến này đã được gửi trong phiên chạy.`);
+        if (currentRun && myRunId === activeRunId) currentRun.done = i + 1;
+        continue;
       }
-    } else {
-      // 🌐 Dùng KHO KỊCH BẢN CHUNG (Master Templates)
-      // Lấy danh sách template được gán riêng cho nhóm này (nếu có)
-      const groupAssigned = db.prepare(`
-        SELECT t.* FROM templates t
-        INNER JOIN group_templates gt ON gt.template_id = t.id
-        WHERE gt.group_id = ? AND t.is_active = 1
-      `).all(group.id);
+      activeDispatchedSet.add(destKey);
 
-      let templatePool = groupAssigned;
-      if (templatePool.length === 0) {
-        if (group.user_id) {
-          templatePool = db.prepare('SELECT * FROM templates WHERE user_id = ? AND is_active = 1').all(group.user_id);
-          if (templatePool.length === 0) {
-            templatePool = db.prepare('SELECT * FROM templates WHERE user_id IS NULL AND is_active = 1').all();
-          }
-        } else {
-          templatePool = allMasterTemplates;
-        }
+      // Reset bộ đếm số lần gửi hôm nay nếu qua ngày mới
+      let sentToday = group.sent_today_count || 0;
+      if (group.last_sent_date !== today) {
+        sentToday = 0;
+        db.prepare('UPDATE groups SET sent_today_count = 0, last_sent_date = ? WHERE id = ?').run(today, group.id);
       }
-      const pickedTemplate = pickRandomTemplate(templatePool);
 
-      if (!pickedTemplate) {
-        console.warn(`⚠️ Bỏ qua nhóm ${group.identifier}: Không có kịch bản chung nào khả dụng`);
-        failCount++;
-        currentRun.fail++;
-        currentRun.done = i + 1;
-        writeLog(group.identifier, group.title, null, 'Chưa có kịch bản', 'failed', 'Không có kịch bản nào đang bật', group.user_id);
+      // Kiểm tra giới hạn số lần gửi trong ngày (nếu chạy tự động)
+      if (!groupIsManual && group.max_repeats_per_day > 0 && sentToday >= group.max_repeats_per_day) {
+        console.log(`⏭️ [${i + 1}/${activeGroupsQueue.length}] Nhóm ${group.identifier} đã đạt tối đa ${sentToday}/${group.max_repeats_per_day} lần/ngày → Bỏ qua.`);
+        if (currentRun && myRunId === activeRunId) currentRun.done = i + 1;
         continue;
       }
 
-      baseContent = pickedTemplate.content;
-      templateId = pickedTemplate.id;
-      templateName = pickedTemplate.name;
+      // ─────────────────────────────────────────────────────────────
+      // 1. Xác định Kịch bản (Kịch bản Riêng vs Kịch bản Chung)
+      // ─────────────────────────────────────────────────────────────
+      let baseContent = '';
+      let imagePath = null;
+      let templateId = null;
+      let templateName = 'Kịch bản chung';
 
-      if (pickedTemplate.image_path) {
-        const resolvedPath = path.resolve(process.env.UPLOADS_DIR || './uploads', pickedTemplate.image_path);
-        if (fs.existsSync(resolvedPath)) {
-          imagePath = resolvedPath;
+      const isCustomTemplate = group.template_mode === 'custom' && group.custom_content && group.custom_content.trim();
+
+      if (isCustomTemplate) {
+        // 🎯 Dùng KỊCH BẢN RIÊNG của nhóm này
+        baseContent = group.custom_content;
+        templateId = null;
+        templateName = 'Kịch bản riêng của nhóm';
+
+        if (group.custom_image_path) {
+          const resolvedPath = path.resolve(process.env.UPLOADS_DIR || './uploads', group.custom_image_path);
+          if (fs.existsSync(resolvedPath)) {
+            imagePath = resolvedPath;
+          }
+        }
+      } else {
+        // 🌐 Dùng KHO KỊCH BẢN CHUNG (Master Templates)
+        const groupAssigned = db.prepare(`
+          SELECT t.* FROM templates t
+          INNER JOIN group_templates gt ON gt.template_id = t.id
+          WHERE gt.group_id = ? AND t.is_active = 1
+        `).all(group.id);
+
+        let templatePool = groupAssigned;
+        if (templatePool.length === 0) {
+          if (group.user_id) {
+            templatePool = db.prepare('SELECT * FROM templates WHERE user_id = ? AND is_active = 1').all(group.user_id);
+            if (templatePool.length === 0) {
+              templatePool = db.prepare('SELECT * FROM templates WHERE user_id IS NULL AND is_active = 1').all();
+            }
+          } else {
+            templatePool = allMasterTemplates;
+          }
+        }
+        const pickedTemplate = pickRandomTemplate(templatePool);
+
+        if (!pickedTemplate) {
+          console.warn(`⚠️ Bỏ qua nhóm ${group.identifier}: Không có kịch bản chung nào khả dụng`);
+          failCount++;
+          if (currentRun && myRunId === activeRunId) {
+            currentRun.fail++;
+            currentRun.done = i + 1;
+          }
+          writeLog(group.identifier, group.title, null, 'Chưa có kịch bản', 'failed', 'Không có kịch bản nào đang bật', group.user_id);
+          continue;
+        }
+
+        baseContent = pickedTemplate.content;
+        templateId = pickedTemplate.id;
+        templateName = pickedTemplate.name;
+
+        if (pickedTemplate.image_path) {
+          const resolvedPath = path.resolve(process.env.UPLOADS_DIR || './uploads', pickedTemplate.image_path);
+          if (fs.existsSync(resolvedPath)) {
+            imagePath = resolvedPath;
+          }
         }
       }
-    }
 
-    // ─────────────────────────────────────────────────────────────
-    // 2. Lấy tài khoản Telegram phụ trách nhóm
-    // ─────────────────────────────────────────────────────────────
-    let account = null;
-    if (group.account_phone) {
-      account = db.prepare('SELECT * FROM accounts WHERE phone = ?').get(group.account_phone);
-    }
-    if (!account || account.status !== 'connected') {
-      if (group.user_id) {
-        account = db.prepare("SELECT * FROM accounts WHERE user_id = ? AND status = 'connected' LIMIT 1").get(group.user_id);
-      } else {
-        account = db.prepare("SELECT * FROM accounts WHERE status = 'connected' LIMIT 1").get();
+      // ─────────────────────────────────────────────────────────────
+      // 2. Lấy tài khoản Telegram phụ trách nhóm
+      // ─────────────────────────────────────────────────────────────
+      let account = null;
+      if (group.account_phone) {
+        account = db.prepare('SELECT * FROM accounts WHERE phone = ?').get(group.account_phone);
       }
-    }
-
-    if (!account) {
-      console.warn(`⚠️ Bỏ qua nhóm ${group.identifier}: Không có tài khoản Telegram nào kết nối`);
-      failCount++;
-      currentRun.fail++;
-      currentRun.done = i + 1;
-      writeLog(group.identifier, group.title, templateId, templateName, 'failed', 'Không có tài khoản Telegram kết nối', group.user_id);
-      continue;
-    }
-
-    // Kiểm tra flood wait
-    if (account.flood_wait_until && account.flood_wait_until > Date.now()) {
-      const remaining = Math.ceil((account.flood_wait_until - Date.now()) / 1000);
-      console.warn(`⏰ Tài khoản ${account.phone} đang FloodWait, còn ${remaining}s.`);
-      failCount++;
-      currentRun.fail++;
-      currentRun.done = i + 1;
-      writeLog(group.identifier, group.title, templateId, templateName, 'failed', `FloodWait ${remaining}s`, group.user_id);
-      continue;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // 3. Ghép nội dung & Hashtag chân trang
-    // ─────────────────────────────────────────────────────────────
-    const messageText = composeGroupMessage(baseContent, group);
-
-    // ─────────────────────────────────────────────────────────────
-    // 4. Gửi tin qua Telegram
-    // ─────────────────────────────────────────────────────────────
-    try {
-      await sendMessage(account.phone, group.identifier, messageText, imagePath);
-
-      // Cập nhật số lần gửi hôm nay & thời gian gửi
-      db.prepare(`
-        UPDATE groups 
-        SET 
-          last_sent_at = CURRENT_TIMESTAMP,
-          sent_today_count = sent_today_count + 1,
-          last_sent_date = ?
-        WHERE id = ?
-      `).run(today, group.id);
-
-      writeLog(group.identifier, group.title, templateId, templateName, 'success', null, group.user_id);
-      successCount++;
-      currentRun.success++;
-      console.log(`✅ [${i + 1}/${groups.length}] Đã gửi thành công → ${group.identifier} (${templateName}) [Hôm nay: ${sentToday + 1}]`);
-    } catch (err) {
-      const errMsg = err.message || String(err);
-
-      if (errMsg.startsWith('FLOOD_WAIT:')) {
-        const seconds = parseInt(errMsg.split(':')[1]) || 60;
-        console.warn(`🚨 FLOOD_WAIT ${seconds}s - Tạm dừng dispatcher`);
-        writeLog(group.identifier, group.title, templateId, templateName, 'failed', `FloodWait ${seconds}s`, group.user_id);
-        updateAccountStatus(account.phone, 'flood_wait', Date.now() + seconds * 1000);
-
-        isRunning = false;
-        failCount++;
-        currentRun.fail++;
-
-        setTimeout(() => {
-          updateAccountStatus(account.phone, 'connected');
-        }, seconds * 1000);
-        break;
+      if (!account || account.status !== 'connected') {
+        if (group.user_id) {
+          account = db.prepare("SELECT * FROM accounts WHERE user_id = ? AND status = 'connected' LIMIT 1").get(group.user_id);
+        } else {
+          account = db.prepare("SELECT * FROM accounts WHERE status = 'connected' LIMIT 1").get();
+        }
       }
 
-      if (errMsg.includes('SESSION_REVOKED') || errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('hết hạn hoặc bị hủy trên thiết bị khác')) {
-        console.warn(`🛑 Dừng các nhóm còn lại do phiên tài khoản ${account.phone} đã hết hạn hoặc bị hủy.`);
-        writeLog(group.identifier, group.title, templateId, templateName, 'failed', errMsg, group.user_id);
+      if (!account) {
+        console.warn(`⚠️ Bỏ qua nhóm ${group.identifier}: Không có tài khoản Telegram nào kết nối`);
         failCount++;
-        currentRun.fail++;
+        if (currentRun && myRunId === activeRunId) {
+          currentRun.fail++;
+          currentRun.done = i + 1;
+        }
+        writeLog(group.identifier, group.title, templateId, templateName, 'failed', 'Không có tài khoản Telegram kết nối', group.user_id);
+        continue;
+      }
+
+      // Kiểm tra flood wait
+      if (account.flood_wait_until && account.flood_wait_until > Date.now()) {
+        const remaining = Math.ceil((account.flood_wait_until - Date.now()) / 1000);
+        console.warn(`⏰ Tài khoản ${account.phone} đang FloodWait, còn ${remaining}s.`);
+        failCount++;
+        if (currentRun && myRunId === activeRunId) {
+          currentRun.fail++;
+          currentRun.done = i + 1;
+        }
+        writeLog(group.identifier, group.title, templateId, templateName, 'failed', `FloodWait ${remaining}s`, group.user_id);
+        continue;
+      }
+
+      // ─────────────────────────────────────────────────────────────
+      // 3. Ghép nội dung & Hashtag chân trang
+      // ─────────────────────────────────────────────────────────────
+      const messageText = composeGroupMessage(baseContent, group);
+
+      // ─────────────────────────────────────────────────────────────
+      // 4. Gửi tin qua Telegram (Có giới hạn timeout cứng 45s mỗi nhóm)
+      // ─────────────────────────────────────────────────────────────
+      try {
+        lastActivityAt = Date.now();
+        await withGroupTimeout(
+          sendMessage(account.phone, group.identifier, messageText, imagePath),
+          45000,
+          group.identifier
+        );
+        lastActivityAt = Date.now();
+
+        if (!isRunning || myRunId !== activeRunId) break;
+
+        // Cập nhật số lần gửi hôm nay & thời gian gửi
+        db.prepare(`
+          UPDATE groups 
+          SET 
+            last_sent_at = CURRENT_TIMESTAMP,
+            sent_today_count = sent_today_count + 1,
+            last_sent_date = ?
+          WHERE id = ?
+        `).run(today, group.id);
+
+        writeLog(group.identifier, group.title, templateId, templateName, 'success', null, group.user_id);
+        successCount++;
+        if (currentRun && myRunId === activeRunId) currentRun.success++;
+        console.log(`✅ [${i + 1}/${activeGroupsQueue.length}] Đã gửi thành công → ${group.identifier} (${templateName}) [Hôm nay: ${sentToday + 1}]`);
+      } catch (err) {
+        lastActivityAt = Date.now();
+        const errMsg = err.message || String(err);
+
+        if (errMsg.startsWith('FLOOD_WAIT:')) {
+          const seconds = parseInt(errMsg.split(':')[1]) || 60;
+          console.warn(`🚨 FLOOD_WAIT ${seconds}s trên tài khoản ${account.phone}`);
+          writeLog(group.identifier, group.title, templateId, templateName, 'failed', `FloodWait ${seconds}s`, group.user_id);
+          updateAccountStatus(account.phone, 'flood_wait', Date.now() + seconds * 1000);
+
+          failCount++;
+          if (currentRun && myRunId === activeRunId) currentRun.fail++;
+
+          setTimeout(() => {
+            updateAccountStatus(account.phone, 'connected');
+          }, seconds * 1000);
+          // Tiếp tục vòng lặp để các nhóm của tài khoản khác vẫn chạy bình thường, nhóm cùng tài khoản sẽ tự skip ở bước kiểm tra flood_wait
+        } else if (errMsg.includes('SESSION_REVOKED') || errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('hết hạn hoặc bị hủy trên thiết bị khác')) {
+          console.warn(`🛑 Tài khoản ${account.phone} đã hết hạn phiên hoặc bị hủy.`);
+          writeLog(group.identifier, group.title, templateId, templateName, 'failed', errMsg, group.user_id);
+          failCount++;
+          if (currentRun && myRunId === activeRunId) currentRun.fail++;
+        } else {
+          console.warn(`❌ [${i + 1}/${activeGroupsQueue.length}] Lỗi → ${group.identifier}: ${errMsg}`);
+          writeLog(group.identifier, group.title, templateId, templateName, 'failed', errMsg, group.user_id);
+          failCount++;
+          if (currentRun && myRunId === activeRunId) currentRun.fail++;
+        }
+      }
+
+      if (currentRun && myRunId === activeRunId) {
         currentRun.done = i + 1;
-        break;
       }
+      lastActivityAt = Date.now();
 
-      console.warn(`❌ [${i + 1}/${groups.length}] Lỗi → ${group.identifier}: ${errMsg}`);
-      writeLog(group.identifier, group.title, templateId, templateName, 'failed', errMsg, group.user_id);
-      failCount++;
-      currentRun.fail++;
+      // Nghỉ ngẫu nhiên giữa các nhóm
+      if (i < activeGroupsQueue.length - 1 && isRunning && myRunId === activeRunId) {
+        console.log(`⏳ Nghỉ ${delayMin}s-${delayMax}s trước nhóm tiếp theo...`);
+        await randomDelay(delayMin, delayMax);
+        lastActivityAt = Date.now();
+      }
     }
 
-    currentRun.done = i + 1;
-
-    // Nghỉ ngẫu nhiên giữa các nhóm
-    if (i < groups.length - 1 && isRunning) {
-      console.log(`⏳ Nghỉ ${delayMin}s-${delayMax}s trước nhóm tiếp theo...`);
-      await randomDelay(delayMin, delayMax);
+    console.log(`🏁 Hoàn thành đợt phát tin (Run #${myRunId}): ${successCount} thành công, ${failCount} thất bại`);
+    const result = { ...(currentRun || {}), success: successCount, fail: failCount };
+    return result;
+  } finally {
+    if (myRunId === activeRunId) {
+      isRunning = false;
+      currentRun = null;
+      activeGroupsQueue = [];
+      activeDispatchedSet.clear();
+      lastActivityAt = 0;
     }
   }
-
-  isRunning = false;
-  console.log(`🏁 Hoàn thành đợt phát tin: ${successCount} thành công, ${failCount} thất bại`);
-
-  const result = { ...currentRun, success: successCount, fail: failCount };
-  currentRun = null;
-  return result;
 }
 
 /**
@@ -369,7 +465,7 @@ async function dispatch(targetGroupId = null, isManual = false, specificGroups =
  * - Nhóm dùng lịch chung: chạy nếu khung giờ hiện tại trùng với schedule_config
  */
 async function checkAndDispatchMinute() {
-  if (isRunning) return;
+  checkAndRecoverStaleRun();
 
   const now = new Date();
   const options = { timeZone: 'Asia/Ho_Chi_Minh', hour12: false, hour: '2-digit', minute: '2-digit' };
@@ -471,16 +567,25 @@ async function checkAndDispatchMinute() {
 }
 
 /**
- * Dừng dispatcher đang chạy
+ * Dừng dispatcher đang chạy và giải phóng toàn bộ khóa ngay lập tức
  */
 function stopDispatch() {
+  activeRunId++;
   isRunning = false;
+  currentRun = null;
+  activeGroupsQueue = [];
+  activeDispatchedSet.clear();
+  lastActivityAt = 0;
+  if (typeof cancelCurrentDelay === 'function') {
+    cancelCurrentDelay();
+  }
 }
 
 /**
  * Lấy trạng thái hiện tại của dispatcher
  */
 function getDispatchStatus() {
+  checkAndRecoverStaleRun();
   return {
     isRunning,
     currentRun,

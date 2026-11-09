@@ -119,9 +119,9 @@ export default function Scheduler() {
   const handleRunNow = async () => {
     try {
       setRunning(true)
-      await api.post('/scheduler/run-now')
-      toast.success('Bắt đầu gửi! Xem nhật ký để theo dõi.')
-      setTimeout(() => fetchConfig(selectedUserId), 2000)
+      const res = await api.post('/scheduler/run-now', { user_id: selectedUserId })
+      toast.success(res.message || 'Bắt đầu gửi! Xem nhật ký để theo dõi.')
+      fetchConfig(selectedUserId)
     } catch (err) {
       toast.error(err.message)
     } finally {
@@ -132,8 +132,8 @@ export default function Scheduler() {
   const handleStop = async () => {
     try {
       await api.post('/scheduler/stop')
-      toast.success('Đã gửi lệnh dừng')
-      setTimeout(() => fetchConfig(selectedUserId), 1000)
+      toast.success('Đã dừng phát tin ngay lập tức')
+      fetchConfig(selectedUserId)
     } catch (err) {
       toast.error(err.message)
     }

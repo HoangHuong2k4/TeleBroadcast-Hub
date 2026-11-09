@@ -10,6 +10,37 @@ const pendingAuth = new Map();
 const connectingPromises = new Map();
 
 /**
+ * Bọc Promise với timeout cứng để không bao giờ bị treo vĩnh viễn khi socket Telegram bị kẹt
+ */
+function withTimeout(promise, ms, label = 'Thao tác Telegram') {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`TIMEOUT: ${label} quá thời gian phản hồi (${Math.round(ms / 1000)}s)`));
+    }, ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * Hủy và xóa client bị treo khỏi bộ nhớ để lượt kế tiếp tạo kết nối mới sạch sẽ
+ */
+function forceResetClient(phone) {
+  if (activeClients.has(phone)) {
+    const client = activeClients.get(phone);
+    activeClients.delete(phone);
+    try {
+      Promise.race([
+        client.disconnect(),
+        new Promise(r => setTimeout(r, 2000))
+      ]).catch(() => {});
+    } catch (_) {}
+  }
+}
+
+/**
  * Tạo TelegramClient mới
  */
 function createClient(apiId, apiHash, sessionString = '') {
@@ -34,7 +65,9 @@ function createClient(apiId, apiHash, sessionString = '') {
 
   const session = new StringSession(sessionString || '');
   const client = new TelegramClient(session, parseInt(apiId), apiHash, {
-    connectionRetries: 5,
+    connectionRetries: 3,
+    requestRetries: 2,
+    timeout: 15,
     retryDelay: 1000,
     autoReconnect: true,
     useWSS: true,
@@ -68,19 +101,24 @@ function handleAuthError(phone) {
  */
 async function getOrCreateClient(phone) {
   if (connectingPromises.has(phone)) {
-    return await connectingPromises.get(phone);
+    return await withTimeout(connectingPromises.get(phone), 25000, `Đợi kết nối ${phone}`);
   }
 
   const connectTask = (async () => {
     // 1. Kiểm tra client hiện tại trong memory
     if (activeClients.has(phone)) {
       const existingClient = activeClients.get(phone);
-      if (existingClient.connected) {
+      const isTransportAlive = existingClient.connected &&
+        (!existingClient._sender || (!existingClient._sender.isReconnecting &&
+          (!existingClient._sender._transportConnected || existingClient._sender._transportConnected())));
+
+      if (isTransportAlive) {
         return existingClient;
       }
-      // Thử reconnect client hiện tại trước
+
+      // Thử reconnect client hiện tại trước (có giới hạn 15s)
       try {
-        await existingClient.connect();
+        await withTimeout(existingClient.connect(), 15000, `Reconnect ${phone}`);
         if (existingClient.connected) {
           updateAccountStatus(phone, 'connected');
           return existingClient;
@@ -90,10 +128,7 @@ async function getOrCreateClient(phone) {
       }
 
       // Nếu không reconnect được, ngắt kết nối sạch trước khi tạo mới để tránh AUTH_KEY_DUPLICATED
-      try {
-        await existingClient.disconnect();
-      } catch (_) {}
-      activeClients.delete(phone);
+      forceResetClient(phone);
     }
 
     // 2. Lấy session từ DB
@@ -105,9 +140,10 @@ async function getOrCreateClient(phone) {
 
     const client = createClient(account.api_id, account.api_hash, account.session_string);
     try {
-      await client.connect();
+      await withTimeout(client.connect(), 20000, `Kết nối Telegram ${phone}`);
 
-      if (!await client.checkAuthorization()) {
+      const isAuthorized = await withTimeout(client.checkAuthorization(), 15000, `Kiểm tra phiên ${phone}`);
+      if (!isAuthorized) {
         handleAuthError(phone);
         throw new Error(`Session của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác, cần đăng nhập lại`);
       }
@@ -118,9 +154,14 @@ async function getOrCreateClient(phone) {
       }
 
       const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
-      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
-        try { await client.disconnect(); } catch (_) {}
+      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406 || errStr.includes('TIMEOUT')) {
+        try {
+          Promise.race([client.disconnect(), new Promise(r => setTimeout(r, 2000))]).catch(() => {});
+        } catch (_) {}
         activeClients.delete(phone);
+        if (errStr.includes('TIMEOUT')) {
+          throw new Error(`Kết nối Telegram (${phone}) bị quá hạn phản hồi. Đã làm mới kết nối cho nhóm kế tiếp.`);
+        }
         throw new Error(`Xung đột kết nối Telegram (${phone}): Phiên đang được kết nối từ nơi khác. Đã đặt lại kết nối, vui lòng thử lại sau vài giây.`);
       }
       throw err;
@@ -255,56 +296,57 @@ async function sendMessage(phone, groupIdentifier, messageText, imagePath = null
     let replyToMsgId = undefined;
 
     try {
-      if (groupIdentifier.includes('t.me/+') || groupIdentifier.includes('t.me/joinchat/')) {
-        let hash = groupIdentifier.includes('t.me/+') 
-          ? groupIdentifier.split('t.me/+').pop()
-          : groupIdentifier.split('t.me/joinchat/').pop();
-        hash = hash.replace(/\//g, '').trim();
+      await withTimeout((async () => {
+        if (groupIdentifier.includes('t.me/+') || groupIdentifier.includes('t.me/joinchat/')) {
+          let hash = groupIdentifier.includes('t.me/+') 
+            ? groupIdentifier.split('t.me/+').pop()
+            : groupIdentifier.split('t.me/joinchat/').pop();
+          hash = hash.replace(/\//g, '').trim();
 
-        const invite = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
-        if (invite.className === 'ChatInviteAlready') {
-          entity = invite.chat;
-        } else {
-          const updates = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
-          if (updates.chats && updates.chats.length > 0) {
-            entity = updates.chats[0];
+          const invite = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+          if (invite.className === 'ChatInviteAlready') {
+            entity = invite.chat;
           } else {
-            throw new Error("Không thể tham gia nhóm này tự động. Vui lòng tham gia bằng app Telegram trước.");
+            const updates = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+            if (updates.chats && updates.chats.length > 0) {
+              entity = updates.chats[0];
+            } else {
+              throw new Error("Không thể tham gia nhóm này tự động. Vui lòng tham gia bằng app Telegram trước.");
+            }
           }
-        }
-      } else if (groupIdentifier.includes('t.me/')) {
-        const urlParts = groupIdentifier.replace(/^https?:\/\/t\.me\//, '').split('/');
-        if (urlParts[0] === 'c' && urlParts.length >= 3) {
-          // Private chat link: t.me/c/1234567890/123
-          if (isNaN(urlParts[1])) {
-            entity = await client.getEntity('@' + urlParts[1]);
+        } else if (groupIdentifier.includes('t.me/')) {
+          const urlParts = groupIdentifier.replace(/^https?:\/\/t\.me\//, '').split('/');
+          if (urlParts[0] === 'c' && urlParts.length >= 3) {
+            // Private chat link: t.me/c/1234567890/123
+            if (isNaN(urlParts[1])) {
+              entity = await client.getEntity('@' + urlParts[1]);
+            } else {
+              const chatId = '-100' + urlParts[1];
+              entity = await client.getEntity(chatId);
+            }
+            replyToMsgId = parseInt(urlParts[2]);
+          } else if (urlParts.length >= 2) {
+            // Public chat link (topic): t.me/username/123
+            const username = '@' + urlParts[0];
+            entity = await client.getEntity(username);
+            replyToMsgId = parseInt(urlParts[1]);
           } else {
-            const chatId = '-100' + urlParts[1];
-            entity = await client.getEntity(chatId);
+            entity = await client.getEntity('@' + urlParts[0]);
           }
-          replyToMsgId = parseInt(urlParts[2]);
-        } else if (urlParts.length >= 2) {
-          // Public chat link (topic): t.me/username/123
-          const username = '@' + urlParts[0];
-          entity = await client.getEntity(username);
-          replyToMsgId = parseInt(urlParts[1]);
         } else {
-          entity = await client.getEntity('@' + urlParts[0]);
+          entity = await client.getEntity(groupIdentifier);
         }
-      } else {
-        entity = await client.getEntity(groupIdentifier);
-      }
+      })(), 20000, `Tìm nhóm ${groupIdentifier}`);
     } catch (err) {
       if (isAuthError(err)) {
         handleAuthError(phone);
         throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác. Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
       }
       const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
-      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
-        if (activeClients.has(phone)) {
-          const c = activeClients.get(phone);
-          try { await c.disconnect(); } catch (_) {}
-          activeClients.delete(phone);
+      if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406 || errStr.includes('TIMEOUT')) {
+        forceResetClient(phone);
+        if (errStr.includes('TIMEOUT')) {
+          throw new Error(`Quá thời gian phản hồi khi kết nối nhóm "${groupIdentifier}". Đã làm mới kết nối cho nhóm kế tiếp.`);
         }
         throw new Error(`Xung đột phiên Telegram (AUTH_KEY_DUPLICATED). Đã đặt lại kết nối cho nhóm kế tiếp.`);
       }
@@ -319,18 +361,26 @@ async function sendMessage(phone, groupIdentifier, messageText, imagePath = null
     }
 
     if (imagePath && require('fs').existsSync(imagePath)) {
-      await client.sendFile(entity, {
-        file: imagePath,
-        caption: processedMessage,
-        parseMode: 'html',
-        replyTo: replyToMsgId,
-      });
+      await withTimeout(
+        client.sendFile(entity, {
+          file: imagePath,
+          caption: processedMessage,
+          parseMode: 'html',
+          replyTo: replyToMsgId,
+        }),
+        35000,
+        `Gửi ảnh vào ${groupIdentifier}`
+      );
     } else {
-      await client.sendMessage(entity, {
-        message: processedMessage,
-        parseMode: 'html',
-        replyTo: replyToMsgId,
-      });
+      await withTimeout(
+        client.sendMessage(entity, {
+          message: processedMessage,
+          parseMode: 'html',
+          replyTo: replyToMsgId,
+        }),
+        30000,
+        `Gửi tin vào ${groupIdentifier}`
+      );
     }
 
 
@@ -341,11 +391,10 @@ async function sendMessage(phone, groupIdentifier, messageText, imagePath = null
       throw new Error(`Phiên đăng nhập Telegram của ${phone} đã hết hạn hoặc bị hủy trên thiết bị khác. Vui lòng vào trang "Tài khoản" để đăng nhập lại OTP.`);
     }
     const errStr = ((err.message || '') + ' ' + (err.errorMessage || '')).toUpperCase();
-    if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406) {
-      if (activeClients.has(phone)) {
-        const c = activeClients.get(phone);
-        try { await c.disconnect(); } catch (_) {}
-        activeClients.delete(phone);
+    if (errStr.includes('AUTH_KEY_DUPLICATED') || err.code === 406 || errStr.includes('TIMEOUT')) {
+      forceResetClient(phone);
+      if (errStr.includes('TIMEOUT')) {
+        throw new Error(`Quá thời gian gửi tin vào "${groupIdentifier}". Đã làm mới kết nối cho nhóm kế tiếp.`);
       }
       throw new Error(`Xung đột phiên Telegram (AUTH_KEY_DUPLICATED). Đã đặt lại kết nối cho nhóm kế tiếp.`);
     }

@@ -175,9 +175,7 @@ router.put('/config/settings', async (req, res) => {
 router.post('/run-now', async (req, res) => {
   try {
     const status = getDispatchStatus();
-    if (status.isRunning) {
-      return res.status(409).json({ success: false, error: 'Dispatcher đang chạy. Vui lòng đợi.' });
-    }
+    const wasRunning = status.isRunning;
 
     const db = getDb();
     const targetUserId = req.body.user_id ? parseInt(req.body.user_id) : req.user.id;
@@ -187,14 +185,19 @@ router.post('/run-now', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Không có nhóm nào đang bật để phát tin' });
     }
 
-    // Chạy bất đồng bộ và trả về ngay
+    // Chạy bất đồng bộ và trả về ngay (nếu đang chạy sẽ tự gộp vào hàng đợi)
     dispatch(null, true, targetGroups).then(result => {
       console.log(`Manual dispatch (User: ${targetUserId}) kết thúc:`, result);
     }).catch(err => {
       console.error('Manual dispatch lỗi:', err);
     });
 
-    res.json({ success: true, message: `Bắt đầu gửi tin cho ${targetGroups.length} nhóm. Xem nhật ký để theo dõi tiến trình.` });
+    res.json({
+      success: true,
+      message: wasRunning
+        ? `Đã thêm ${targetGroups.length} nhóm vào hàng đợi phát tin đang chạy!`
+        : `Bắt đầu gửi tin cho ${targetGroups.length} nhóm. Xem nhật ký để theo dõi tiến trình.`
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -204,17 +207,20 @@ router.post('/run-now', async (req, res) => {
 router.post('/run-group/:id', async (req, res) => {
   try {
     const status = getDispatchStatus();
-    if (status.isRunning) {
-      return res.status(409).json({ success: false, error: 'Dispatcher đang chạy. Vui lòng đợi.' });
-    }
+    const wasRunning = status.isRunning;
 
-    dispatch(req.params.id).then(result => {
+    dispatch(req.params.id, true).then(result => {
       console.log(`Manual group ${req.params.id} dispatch kết thúc:`, result);
     }).catch(err => {
       console.error(`Manual group ${req.params.id} dispatch lỗi:`, err);
     });
 
-    res.json({ success: true, message: 'Bắt đầu gửi tin đến nhóm. Xem nhật ký để theo dõi tiến trình.' });
+    res.json({
+      success: true,
+      message: wasRunning
+        ? 'Đã thêm nhóm vào hàng đợi phát tin đang chạy!'
+        : 'Bắt đầu gửi tin đến nhóm. Xem nhật ký để theo dõi tiến trình.'
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

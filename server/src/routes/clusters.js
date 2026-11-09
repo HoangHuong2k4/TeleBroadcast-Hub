@@ -231,9 +231,7 @@ router.delete('/:id', (req, res) => {
 router.post('/:id/run-now', async (req, res) => {
   try {
     const status = getDispatchStatus();
-    if (status.isRunning) {
-      return res.status(409).json({ success: false, error: 'Dispatcher đang bận gửi tin đợt trước. Vui lòng đợi!' });
-    }
+    const wasRunning = status.isRunning;
 
     const db = getDb();
     const cluster = db.prepare('SELECT * FROM clusters WHERE id = ?').get(req.params.id);
@@ -250,7 +248,7 @@ router.post('/:id/run-now', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Cụm Chợ này chưa có chợ nào đang kích hoạt (active)' });
     }
 
-    // Chạy ngầm phát tin cho tập hợp chợ này
+    // Chạy ngầm phát tin cho tập hợp chợ này (nếu đang chạy đợt khác sẽ tự gộp vào hàng đợi)
     dispatch(null, true, clusterGroups).then(result => {
       console.log(`🚀 Hoàn thành phát tin cho Cụm [${cluster.name}]:`, result);
     }).catch(err => {
@@ -259,7 +257,9 @@ router.post('/:id/run-now', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Đang phát tin cho ${clusterGroups.length} chợ trong cụm "${cluster.name}". Xem trang Nhật Ký để theo dõi!`
+      message: wasRunning
+        ? `Đã gộp thêm ${clusterGroups.length} chợ của cụm "${cluster.name}" vào hàng đợi đang chạy!`
+        : `Đang phát tin cho ${clusterGroups.length} chợ trong cụm "${cluster.name}". Xem trang Nhật Ký để theo dõi!`
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
